@@ -16,7 +16,7 @@ Functions:
 import re
 import inspect
 import pathlib
-from typing import Dict, Generator, Any
+from typing import Dict, Callable, Generator, Tuple
 
 # 3rd party
 import numpy as np
@@ -94,7 +94,7 @@ class DataReader(object):
         self.data_type = data_type
 
     @classmethod
-    def get_readers(cls):
+    def get_readers(cls) -> Dict[str, Callable]:
         """ Get the supported readers for this class
 
         :returns:
@@ -108,11 +108,13 @@ class DataReader(object):
             readers[match.group('name')] = meth
         return readers
 
-    def read_data_frame(self, infile: pathlib.Path, **kwargs):
+    def read_data_frame(self, infile: pathlib.Path, **kwargs) -> pd.DataFrame:
         """ Read in a data frame from a spreadsheet
 
         :param Path infile:
             The input file to read
+        :param \\*\\*kwargs:
+            Arguments to pass to the various ``pandas.read_*`` methods
         :returns:
             A DataFrame containing the contents of the file
         """
@@ -130,7 +132,7 @@ class DataReader(object):
         else:
             raise KeyError(f'No DataFrame reader for file type "{infile}"')
 
-    def read_infile(self, infile: pathlib.Path, **kwargs):
+    def read_infile(self, infile: pathlib.Path, **kwargs) -> Tuple[np.ndarray]:
         """ Dispatch based on type
 
         :param Path infile:
@@ -173,11 +175,13 @@ class DataReader(object):
         shift[shift < level_min] = level_min
         means = means - np.nanmin(means, axis=0) + shift
 
-        print('Got {} traces with {} samples each'.format(means.shape[1], means.shape[0]))
+        print(f'Got {means.shape[1]} traces with {means.shape[0]} samples each')
         assert means.shape[0] == time.shape[0]
         return time, means
 
-    def read_infile_ephys_data(self, infile: pathlib.Path):
+    # File type readers
+
+    def read_infile_ephys_data(self, infile: pathlib.Path) -> Tuple[np.ndarray]:
         """ Read Mike's data
 
         Ephys data is a CSV file with or without a header with columns:
@@ -204,7 +208,9 @@ class DataReader(object):
             df = self.read_data_frame(infile, header=None, skiprows=1)
         time = df.iloc[:, 0]
         if time.dtype not in (np.dtype('float64'), np.dtype('int64')):
-            raise ValueError('Cannot understand file header: {}'.format(infile))
+            raise ValueError(f'Cannot understand file header: {infile}')
+
+        # The first vector is time, all subsequent vectors are traces
         time = df.iloc[:, 0].values
         means = df.iloc[:, 1:].values
 
@@ -213,7 +219,7 @@ class DataReader(object):
 
     def read_infile_ca_data(self,
                             infile: pathlib.Path,
-                            min_samples: int = 10):
+                            min_samples: int = 10) -> Tuple[np.ndarray]:
         """ Read the Ca data input file
 
         CA GCAMP imaging has a crazy file structure:
@@ -238,6 +244,7 @@ class DataReader(object):
             (time, means) for each roi in the file
         """
 
+        # Use a regex on the headers to match time/signal/area
         time_indices = []
         area_indices = []
         mean_indices = []
@@ -264,15 +271,17 @@ class DataReader(object):
                     break
 
         # Sanity checks for badly formatted files
+
+        # Time index needs to be unique
         if len(time_indices) == 0:
             err = f'Invalid stat file. Cannot find the time index in: {infile}'
             raise OSError(err)
         elif len(time_indices) > 1:
-            err = 'Invalid stat file. Columns {} all appear to be time records in: {}'
-            err = err.format(time_indices, infile)
+            err = f'Invalid stat file. Columns {time_indices} all appear to be time records in: {infile}'
             raise OSError(err)
         time_idx = time_indices[0]
 
+        # Area index and mean need to be non-zero length
         if len(area_indices) == 0:
             err = f'Invalid stat file. Cannot find any area columns in: {infile}'
             raise OSError(err)
@@ -280,6 +289,7 @@ class DataReader(object):
             err = f'Invalid stat file. Cannot find any signal value columns in: {infile}'
             raise OSError(err)
 
+        # Need the same number of areas as means
         if len(area_indices) != len(mean_indices):
             err = 'Invalid stat file. Got {} unique ROIs but {} signal values in: {}'
             err = err.format(len(area_indices), len(mean_indices), infile)
@@ -300,6 +310,7 @@ class DataReader(object):
         # Time < 0 means that this sample isn't valid for this timepoint
         means[time < 0] = np.nan
 
+        # Throw out any columns with too many empty samples
         keep_cols = np.sum(~np.isnan(means), axis=0) >= min_samples
         means = means[:, keep_cols]
         if means.shape[1] < 1:
@@ -310,7 +321,7 @@ class DataReader(object):
 
     def read_infile_measure_data(self,
                                  infile: pathlib.Path,
-                                 min_samples: int = 10):
+                                 min_samples: int = 10) -> Tuple[np.ndarray]:
         """ Read the Zen Measure Tool Output file
 
         CA GCAMP imaging has a crazy file structure:
@@ -338,6 +349,7 @@ class DataReader(object):
             (time, means) for each roi in the file
         """
 
+        # Use a regex on the headers to match time/signal/area
         name_indices = []
         time_indices = []
         area_indices = []
@@ -366,43 +378,37 @@ class DataReader(object):
                     break
 
         # Sanity checks for badly formatted files
+
+        # For this format, all columns need to be unique
         if len(time_indices) == 0:
-            err = 'Invalid stat file. Cannot find the time index in: {}'
-            err = err.format(infile)
+            err = f'Invalid stat file. Cannot find the time index in: {infile}'
             raise OSError(err)
         elif len(time_indices) > 1:
-            err = 'Invalid stat file. Columns {} all appear to be time records in: {}'
-            err = err.format(time_indices, infile)
+            err = f'Invalid stat file. Columns {time_indices} all appear to be time records in: {infile}'
             raise OSError(err)
         time_idx = time_indices[0]
 
         if len(area_indices) == 0:
-            err = 'Invalid stat file. Cannot find any area columns in: {}'
-            err = err.format(infile)
+            err = f'Invalid stat file. Cannot find any area columns in: {infile}'
             raise OSError(err)
         elif len(area_indices) > 1:
-            err = 'Invalid stat file. Columns {} all appear to be area records in: {}'
-            err = err.format(area_indices, infile)
+            err = f'Invalid stat file. Columns {area_indices} all appear to be area records in: {infile}'
             raise OSError(err)
         area_idx = area_indices[0]
 
         if len(mean_indices) == 0:
-            err = 'Invalid stat file. Cannot find any signal value columns in: {}'
-            err = err.format(infile)
+            err = f'Invalid stat file. Cannot find any signal value columns in: {infile}'
             raise OSError(err)
         elif len(mean_indices) > 1:
-            err = 'Invalid stat file. Columns {} all appear to be signal value records in: {}'
-            err = err.format(mean_indices, infile)
+            err = f'Invalid stat file. Columns {mean_indices} all appear to be signal value records in: {infile}'
             raise OSError(err)
         mean_idx = mean_indices[0]
 
         if len(name_indices) == 0:
-            err = 'Invalid stat file. Cannot find any name columns in: {}'
-            err = err.format(infile)
+            err = f'Invalid stat file. Cannot find any name columns in: {infile}'
             raise OSError(err)
         elif len(name_indices) > 1:
-            err = 'Invalid stat file. Columns {} all appear to be name records in: {}'
-            err = err.format(mean_indices, infile)
+            err = f'Invalid stat file. Columns {name_indices} all appear to be name records in: {infile}'
             raise OSError(err)
         name_idx = name_indices[0]
 
@@ -412,6 +418,7 @@ class DataReader(object):
         # print('Area column: {}'.format(area_idx))
         # print('Mean column: {}'.format(mean_idx))
 
+        # Now restack everything so there is one time column, many signal columns
         names = df.iloc[:, name_idx].values
         times = df.iloc[:, time_idx].values.astype(np.float)
         areas = df.iloc[:, area_idx].values.astype(np.float)
@@ -426,11 +433,12 @@ class DataReader(object):
             mask = names == name
             if stack_times is None:
                 stack_times = times[mask]
-            else:
-                assert np.allclose(stack_times, times[mask])
+            elif not np.allclose(stack_times, times[mask]):
+                raise ValueError(f'Misaligned time vectors in {infile}')
             stack_areas.append(areas[mask])
             stack_means.append(means[mask])
 
+        # Now we have the times and area columns in the order we need them
         times = stack_times
         means = np.stack(stack_means, axis=1)
         areas = np.stack(stack_areas, axis=1)
@@ -444,11 +452,10 @@ class DataReader(object):
         keep_cols = np.sum(~np.isnan(means), axis=0) >= min_samples
         means = means[:, keep_cols]
         if means.shape[1] < 1:
-            err = 'Empty stat file. No ROIs with at least {} samples in {}'
-            err = err.format(min_samples, infile)
+            err = f'Empty stat file. No ROIs with at least {min_samples} samples in {infile}'
             raise OSError(err)
-
         return times, means
+
 
 # Functions
 
@@ -459,7 +466,7 @@ def save_outfile(outfile: pathlib.Path,
     """ Save the filtered output
 
     :param Path outfile:
-        The path to the filtered output CSV file
+        The path to the filtered output CSV or excel file
     :param ndarray time:
         The n x 1 array of time steps to save
     :param ndarray signals:
@@ -475,11 +482,15 @@ def save_outfile(outfile: pathlib.Path,
         df[key] = signals[:, i]
 
     df = pd.DataFrame(df)
-    df.to_csv(str(outfile), columns=columns, index=False)
+    if outfile.suffix in ('.csv', ):
+        df.to_csv(str(outfile), columns=columns, index=False)
+    elif outfile.suffix in ('.xls', '.xlsx'):
+        df.to_excel(str(outfile), columns=columns, index=False)
+    else:
+        raise KeyError(f'Unknown output file suffix "{outfile}"')
 
 
-def save_final_stats(outfile: pathlib.Path,
-                     stats: Dict[str, Dict[str, Any]]):
+def save_final_stats(outfile: pathlib.Path, stats: Dict):
     """ Save the composite stats for everything
 
     :param Path outfile:
@@ -498,11 +509,29 @@ def save_final_stats(outfile: pathlib.Path,
             for k, v in rec.items():
                 df.setdefault(k, []).append(v)
 
-    assert all(len(v) == len(df['Filename']) for v in df.values())
+    # Handle failed analyses
+    if 'Filename' not in df:
+        raise ValueError(f'No summary results from analyzing "{outfile}"')
 
-    print('Writing: {}'.format(outfile))
+    # Validate the final record numbers
+    num_recs = len(df['Filename'])
+    invalid_records = 0
+    for key, vals in df.items():
+        if len(vals) != num_recs:
+            print(f'* Invalid {key} records: expected {num_recs}, got {len(vals)}')
+            invalid_records += 1
+    if invalid_records > 0:
+        raise ValueError(f'Got {invalid_records} rows for "{outfile}"')
+
+    # Save the final stats to a file
+    print(f'Writing: {outfile}')
     df = pd.DataFrame(df)
-    df.to_excel(str(outfile), index=False)
+    if outfile.suffix in ('.csv', ):
+        df.to_csv(str(outfile), index=False)
+    elif outfile.suffix in ('.xls', '.xlsx'):
+        df.to_excel(str(outfile), index=False)
+    else:
+        raise KeyError(f'Unknown file type "{outfile}"')
 
 
 def find_ca_data(datadir: pathlib.Path) -> Generator[pathlib.Path, None, None]:

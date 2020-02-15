@@ -8,11 +8,11 @@ Main processing functions:
 Classes:
 
 * :py:class:`AnalysisParams`: Analysis parameters for each trace study
-* :py:class:`ExpModelFit`: Fit decay curves to traces
 
 Functions:
 
-* :py:func:`fit_model`: Fit decay curves to traces
+* :py:func:`plot_signals`: Plot the traces for the signal sets
+* :py:func:`remove_trend`: Remove the trend from the individual traces
 
 Signal Helpers:
 
@@ -24,7 +24,7 @@ Signal Helpers:
 import pathlib
 import traceback
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple, Dict
 
 # 3rd party libs
 import numpy as np
@@ -37,11 +37,11 @@ from sklearn.preprocessing import PolynomialFeatures
 from sklearn.pipeline import make_pipeline
 from sklearn.linear_model import RANSACRegressor, LinearRegression, Ridge
 
-from scipy.optimize import curve_fit
 from scipy.signal import butter, filtfilt, welch
 
 # Our own imports
 from .io import DataReader, save_outfile
+from .models import ExpModelFit, fit_model
 from .consts import (
     SIGNAL_TYPE, FILTER_CUTOFF, SAMPLES_AROUND_PEAK, LINEAR_MODEL, DATA_TYPE,
     TIME_SCALE, PLOT_SUFFIX, FILTER_ORDER, DEBUG_OPTIMIZER, MIN_STATS_SCORE,
@@ -111,260 +111,11 @@ class AnalysisParams(object):
     plot_suffix: str = PLOT_SUFFIX
 
 
-class ExpModelFit(object):
-    """ Fit different exponential models
-
-    :param ndarray time:
-        Time vector for the signal
-    :param ndarray signal:
-        Values for the signal
-    :param float time_scale:
-        Samples/second of the signal
-    """
-
-    def __init__(self,
-                 time: np.ndarray,
-                 signal: np.ndarray,
-                 time_scale: float = TIME_SCALE):
-        self.time = time
-        self.signal = signal
-        self.time_scale = time_scale
-
-        # Tau as ms (should be approximately t90_down - t_peak)
-        self._scaled_time = None
-        self._smooth_signal = None
-
-        self.amp_min = 0.0
-        self.tc_min = 0.0
-        self.offset_min = -4.0
-
-        self.amp_max = None
-        self.tc_max = 10.0
-        self.offset_max = 10.0
-        self.max_feval = 5000
-
-        # Initial guesses
-        self.init_tc = None
-        self.init_amp = None
-        self.init_offset = None
-
-        # Single fit
-        self.se_tc = None
-        self.se_amp = None
-        self.se_offset = None
-
-        # Double fit
-        self.de_amp = None
-        self.de_offset = None
-        self.de_tc1 = None
-        self.de_tc2 = None
-        self.de_tmean = None
-        self.de_tsigma = None
-
-    def smooth_signal(self):
-        """ Smooth the signal using legendre polynomials """
-
-        scaled_time = np.linspace(0, 1, self.signal.shape[0])
-        mask = np.logical_and(np.isfinite(self.signal), np.isfinite(scaled_time))
-        self._smooth_signal = self.signal[mask]
-        self._scaled_time = scaled_time[mask]
-        self.se_offset = self.de_offset = np.min(self._smooth_signal)
-
-    def initialize_guesses(self):
-        """ Initial guess for the signal """
-        self.init_offset = np.min(self._smooth_signal)
-        log_signal = np.log(self._smooth_signal - np.min(self._smooth_signal) + 1)
-        coeffs = np.polyfit(self._scaled_time, log_signal, 1)
-
-        self.init_tc = -coeffs[0]
-        self.init_amp = coeffs[1]
-        self.amp_max = 1.5*(np.max(self._smooth_signal) - np.min(self._smooth_signal))
-
-        if DEBUG_OPTIMIZER:
-            print('Initial Tc Guess:     {:0.4f}'.format(self.init_tc))
-            print('Initial Amp Guess:    {:0.4f}'.format(self.init_amp))
-            print('Initial Offset Guess: {:0.4f}'.format(self.init_offset))
-
-    def fit_single_exp(self):
-        """ Fit a single exponential curve """
-        # Guess at the initial parameters and boundaries
-        param_guesses = (self.init_amp, self.init_tc, self.init_offset)
-        param_bounds = [(self.amp_min, self.tc_min, self.offset_min),
-                        (self.amp_max, self.tc_max, self.offset_max)]
-        try:
-            fit_opt, _ = curve_fit(
-                self.single_exp_model, self._scaled_time, self._smooth_signal,
-                p0=param_guesses,
-                bounds=param_bounds,
-                maxfev=self.max_feval,
-            )
-        except (ValueError, RuntimeError):
-            if DEBUG_OPTIMIZER:
-                print('Single opt failed...')
-                traceback.print_exc()
-            # If we get a fit error, just return nans
-            fit_opt = tuple(np.nan for _ in param_guesses)
-        self.se_amp = fit_opt[0]
-        self.se_tc = fit_opt[1]
-        self.se_offset = fit_opt[2]
-
-        if DEBUG_OPTIMIZER:
-            print('Single Tc Fit:     {:0.4f}'.format(self.se_tc))
-            print('Single Amp Fit:    {:0.4f}'.format(self.se_amp))
-            print('Single Offset Fit: {:0.4f}'.format(self.se_offset))
-
-    def fit_double_exp(self):
-        """ Fit a double exponential curve """
-        # Guess at the initial parameters and boundaries
-        # amp, offset, tc1, tc2, tmean, tsigma
-        param_guesses = (self.se_amp, self.se_offset, self.se_tc*0.5, self.se_tc*1.5, 0.5, 0.1)
-        param_bounds = [(self.amp_min, self.offset_min, self.tc_min, self.tc_min, 0.1, 0.01),
-                        (self.amp_max, self.offset_max, self.tc_max, self.tc_max, 0.9, 0.2)]
-        try:
-            fit_opt, _ = curve_fit(
-                self.double_exp_model, self._scaled_time, self._smooth_signal,
-                p0=param_guesses,
-                bounds=param_bounds,
-                maxfev=self.max_feval,
-            )
-        except (ValueError, RuntimeError):
-            if DEBUG_OPTIMIZER:
-                print('Double opt failed...')
-                traceback.print_exc()
-            # If we get a fit error, just return nans
-            fit_opt = tuple(np.nan for _ in param_guesses)
-
-        # amp, offset, tc1, tc2, tmean, tsigma
-        self.de_amp = fit_opt[0]
-        self.de_offset = fit_opt[1]
-        self.de_tc1 = fit_opt[2]
-        self.de_tc2 = fit_opt[3]
-        self.de_tmean = fit_opt[4]
-        self.de_tsigma = fit_opt[5]
-
-        if DEBUG_OPTIMIZER:
-            print('Double Amp Fit:    {:0.4f}'.format(self.de_amp))
-            print('Double Offset Fit: {:0.4f}'.format(self.de_offset))
-            print('Double Tc1 Fit:    {:0.4f}'.format(self.de_tc1))
-            print('Double Tc2 Fit:    {:0.4f}'.format(self.de_tc2))
-            print('Double Tmean Fit:  {:0.4f}'.format(self.de_tmean))
-            print('Double Tsigma Fit: {:0.4f}'.format(self.de_tsigma))
-
-    def plot_fit(self):
-        """ Plot the model fit """
-
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 8))
-
-        se_signal = self.single_exp_model(self._scaled_time, self.se_amp, self.se_tc, self.se_offset)
-        de_signal = self.double_exp_model(
-            self._scaled_time, self.de_amp, self.de_offset, self.de_tc1, self.de_tc2,
-            self.de_tmean, self.de_tsigma)
-
-        ax1.plot(self._scaled_time, se_signal, '-r')
-        ax1.plot(self._scaled_time, self._smooth_signal, 'om')
-
-        ax2.plot(self._scaled_time, de_signal, '-r')
-        ax2.plot(self._scaled_time, self._smooth_signal, 'om')
-
-        fig.suptitle('{} Points'.format(se_signal.shape[0]))
-
-        plt.show()
-
-    def get_single_exp_params(self):
-        """ Get a dictionary of parameters for the single exp fit
-
-        :returns:
-            A dictionary of the parameters, converted back to real time
-        """
-        time_range = np.nanmax(self.time) - np.nanmin(self.time)
-        return {
-            'se_amp': self.se_amp,
-            'se_offset': self.se_offset,
-            'se_tc': time_range / self.se_tc,
-        }
-
-    def get_double_exp_params(self):
-        """ Get a dictionary of parameters for the single exp fit
-
-        :returns:
-            A dictionary of the parameters, converted back to real time
-        """
-        time_range = np.nanmax(self.time) - np.nanmin(self.time)
-        return {
-            'de_amp': self.de_amp,
-            'de_offset': self.de_offset,
-            'de_tc1': time_range / self.de_tc1,
-            'de_tc2': time_range / self.de_tc2,
-            'de_tmean': self.de_tmean,
-            'de_tsigma': self.de_tsigma,
-        }
-
-    @staticmethod
-    def double_exp_model(x: np.ndarray,
-                         amp: float,
-                         offset: float,
-                         tc1: float,
-                         tc2: float,
-                         tmean: float,
-                         tsigma: float):
-        """ Double exponential model
-
-        Based on:
-        "Piecewise exponential survival curves with smooth transitions"
-        Zelterman et al, Mathematical Biosciences. 1994.
-
-        :param ndarray x:
-            The time signal
-        :param float amp:
-            The amplitude for the system
-        :param float offset:
-            The signal offset for the system
-        :param float tc1:
-            The time constant for x < tmean
-        :param float tc2:
-            The time constant for x > tmean
-        :param float tmean:
-            The mean transition point between tc1 and tc2
-        :param float tsigma:
-            The width of the transition between tc1 and tc2 around tmean
-        :returns:
-            The exponential decay curve
-        """
-        # Specifically, this implements eq 9
-        mask = x <= tmean - tsigma
-        signal1 = np.exp(-tc1*x)
-        signal2 = np.exp(-tc2*x - (tc1-tc2)*(tmean - tsigma*np.exp(-(x - tmean + tsigma)/tsigma)))
-        signal = np.zeros_like(x)
-        signal[mask] = signal1[mask] * amp + offset
-        signal[~mask] = signal2[~mask] * amp + offset
-        return signal
-
-    @staticmethod
-    def single_exp_model(x: np.ndarray,
-                         amp: float,
-                         tc: float,
-                         offset: float):
-        """ Single exponential signal fit model
-
-        :param ndarray x:
-            The time signal
-        :param float amp:
-            The amplitude
-        :param float tc:
-            The time constant
-        :param float offset:
-            The signal offset
-        :returns:
-            The exponential decay curve
-        """
-        return amp*np.exp(-tc*x) + offset
-
-
 # Functions
 
 
 def calc_frequency_domain(time: np.ndarray,
-                          signal: np.ndarray):
+                          signal: np.ndarray) -> Tuple[np.ndarray]:
     """ Calculate the frequency domain data
 
     :param ndarray time:
@@ -375,34 +126,9 @@ def calc_frequency_domain(time: np.ndarray,
         The frequency array, the power at each frequency
     """
     dt = time[1] - time[0]
-    fs = 1 / dt
-    xf, yf = welch(signal, fs=fs)  # Welch's power estimate method
-    return xf, 10 * np.log10(yf)
-
-
-def fit_model(time: np.ndarray,
-              signal: np.ndarray,
-              time_scale: float = TIME_SCALE) -> ExpModelFit:
-    """ Fit a model to the signal data
-
-    :param ndarray time:
-        The 1D time array
-    :param ndarray signal:
-        The 1D signal array
-    :param func model:
-        The model function to fit
-    :param float time_scale:
-        The scale factor for time (milliseconds/second)
-    :returns:
-        A tuple of model parameters for each model
-    """
-    model = ExpModelFit(time, signal,
-                        time_scale=time_scale)
-    model.smooth_signal()
-    model.initialize_guesses()
-    model.fit_single_exp()
-    model.fit_double_exp()
-    return model
+    sample_rate = 1.0 / dt
+    xf, yf = welch(signal, fs=sample_rate)  # Welch's power estimate method
+    return xf, 10.0 * np.log10(yf)
 
 
 def plot_signals(infile: pathlib.Path,
@@ -410,13 +136,15 @@ def plot_signals(infile: pathlib.Path,
                  signals: np.ndarray,
                  plot_types: Optional[List[str]] = None,
                  raw_signals: Optional[np.ndarray] = None,
-                 trend_lines=None,
-                 stats=None,
-                 signal_type=SIGNAL_TYPE,
-                 time_scale=TIME_SCALE,
-                 filter_cutoff=FILTER_CUTOFF,
-                 figsize=FIGSIZE,
-                 plotfile=None):
+                 trend_lines: Optional[np.ndarray] = None,
+                 stats:  List[Dict] = None,
+                 signal_type: str = SIGNAL_TYPE,
+                 time_scale: float = TIME_SCALE,
+                 filter_cutoff: float = FILTER_CUTOFF,
+                 figsize: Tuple[float] = FIGSIZE,
+                 plotfile: Optional[pathlib.Path] = None,
+                 single_model_color: str = '#00FF00',
+                 double_model_color: str = '#009900'):
     """ Plot the signals over time
 
     :param Path infile:
@@ -451,8 +179,7 @@ def plot_signals(infile: pathlib.Path,
     if stats is None:
         stats = [{} for _ in range(signals.shape[1])]
     if len(stats) != signals.shape[1]:
-        err = 'Got {} stat measurements but {} signals'
-        err = err.format(len(stats), signals.shape[1])
+        err = f'Got {len(stats)} stat measurements but {signals.shape[1]} signals'
         raise ValueError(err)
 
     if raw_signals is not None:
@@ -466,7 +193,7 @@ def plot_signals(infile: pathlib.Path,
         elif signal_type == 'F-F0':
             raw_signals = raw_signals - raw_mean
         else:
-            raise KeyError('Unknown signal type: {}'.format(signal_type))
+            raise KeyError(f'Unknown signal type: "{signal_type}"')
         assert raw_signals.shape[0] == time.shape[0]
         assert raw_signals.shape[1] == signals.shape[1]
 
@@ -479,7 +206,7 @@ def plot_signals(infile: pathlib.Path,
             elif signal_type == 'F-F0':
                 trend_lines = trend_lines - raw_mean
             else:
-                raise KeyError('Unknown signal type: {}'.format(signal_type))
+                raise KeyError(f'Unknown signal type: "{signal_type}"')
             assert trend_lines.shape[1] == signals.shape[1]
 
     for i in range(signals.shape[1]):
@@ -500,6 +227,8 @@ def plot_signals(infile: pathlib.Path,
         # Plot the processed data
         if 'filtered' in plot_types:
             signal_stats = stats[i].get('signal_stats', [])
+            labeled_single = False
+            labeled_double = False
             for peak_stats in signal_stats:
                 # Plot the detected peaks and the surrounding mins
                 peak_index = peak_stats['peak_index']
@@ -516,6 +245,10 @@ def plot_signals(infile: pathlib.Path,
                 peak_time_offset = np.min(peak_time)
                 peak_time_end = np.max(peak_time)
                 peak_range = (peak_time_end - peak_time_offset)
+
+                # Skip peak detections that failed
+                if (peak_end_index - peak_index) < 3 or peak_range < 1e-5:
+                    continue
                 scaled_peak_time = (peak_time - peak_time_offset)/peak_range
 
                 # Single exponential fit
@@ -525,10 +258,15 @@ def plot_signals(infile: pathlib.Path,
                                                                    peak_range/peak_stats['se_tc'],
                                                                    peak_stats['se_offset'])
                     if np.any(np.isfinite(scaled_peak_fit)):
-                        ax0.plot(peak_time + peak_time_offset/time_scale,
-                                 scaled_peak_fit, '-g')
+                        if not labeled_single:
+                            labeled_single = True
+                            label = 'single exp'
+                        else:
+                            label = None
+                        ax0.plot(peak_time, scaled_peak_fit, '-',
+                                 color=single_model_color, label=label)
                     elif DEBUG_OPTIMIZER:
-                        print('Invalid single fit for {}'.format(infile.stem))
+                        print(f'Invalid single fit for {infile.stem}')
 
                 # Double exponential fit
                 if 'de_amp' in peak_stats:
@@ -538,15 +276,20 @@ def plot_signals(infile: pathlib.Path,
                         peak_stats['de_tmean'], peak_stats['de_tsigma'],
                     )
                     if np.any(np.isfinite(scaled_peak_fit)):
-                        ax0.plot(peak_time + peak_time_offset/time_scale,
-                                 scaled_peak_fit, '-', color='#00AA00')
+                        if not labeled_double:
+                            labeled_double = True
+                            label = 'double exp'
+                        else:
+                            label = None
+                        ax0.plot(peak_time, scaled_peak_fit, '-',
+                                 color=double_model_color, label=label)
                     elif DEBUG_OPTIMIZER:
-                        print('Invalid double fit for {}'.format(infile.stem))
+                        print(f'Invalid double fit for {infile.stem}')
 
         if 'raw' in plot_types or 'filtered' in plot_types:
             ax0.set_xlabel('Time (ms)')
             ax0.set_ylabel('Intensity')
-            ax0.set_title('{} Intensity {}'.format(signal_type, infile.stem))
+            ax0.set_title(f'{signal_type} Intensity {infile.stem}')
             ax0.legend()
 
         # Frequency domain signal
@@ -562,20 +305,23 @@ def plot_signals(infile: pathlib.Path,
 
             ax1.set_xlabel('Frequency (Hz)')
             ax1.set_ylabel('Intensity (dB)')
-            ax1.set_title('{} Intensity {}'.format(signal_type, infile.stem))
+            ax1.set_title(f'{signal_type} Intensity {infile.stem}')
             ax1.legend()
 
         if plotfile is None:
             plt.show()
         else:
             plotfile = pathlib.Path(plotfile)
-            final_plotfile = plotfile.parent / '{}_{:02d}{}'.format(plotfile.stem, i+1, plotfile.suffix)
+            final_plotfile = plotfile.parent / f'{plotfile.stem}_{i+1:02d}{plotfile.suffix}'
             final_plotfile.parent.mkdir(exist_ok=True, parents=True)
             fig.savefig(str(final_plotfile))
             plt.close()
 
 
-def remove_trend(signals, signal_type=SIGNAL_TYPE, skip_detrend=False, linear_model=LINEAR_MODEL):
+def remove_trend(signals: np.ndarray,
+                 signal_type: str = SIGNAL_TYPE,
+                 skip_detrend: bool = False,
+                 linear_model: str = LINEAR_MODEL) -> np.ndarray:
     """ Detrend the signals because they have bad trend lines
 
     Uses a RANSAC linear regression to fit a line to the base of the signal
@@ -586,6 +332,9 @@ def remove_trend(signals, signal_type=SIGNAL_TYPE, skip_detrend=False, linear_mo
         Which normalization method to use (one of 'F/F0', 'F-F0', 'F-F0/F0')
     :param bool skip_detrend:
         If True, skip the linear detrend pass and just normalize to the signal minimum
+    :param str linear_model:
+        How to estimate the signal baseline (one of boxcar, least_squares, ransac,
+        exp_ransac, quadratic)
     :returns:
         A new ndarray with the signals normalized
     """
@@ -628,7 +377,7 @@ def remove_trend(signals, signal_type=SIGNAL_TYPE, skip_detrend=False, linear_mo
             model.fit(xm.reshape(-1, 1), ym)
             yr = model.predict(x.reshape(-1, 1))
         else:
-            raise KeyError('Unknown linear model: {}'.format(linear_model))
+            raise KeyError(f'Unknown linear model: "{linear_model}"')
 
         trend_lines.append(yr)
 
@@ -641,30 +390,33 @@ def remove_trend(signals, signal_type=SIGNAL_TYPE, skip_detrend=False, linear_mo
             # (F - F0) / (F0)
             detrended_signals.append((signal - yr) / yr)
         else:
-            raise KeyError('Unknown signal type: {}'.format(signal_type))
+            raise KeyError(f'Unknown signal type: "{signal_type}"')
     return np.stack(detrended_signals, axis=1), np.stack(trend_lines, axis=1)
 
 
-def lowpass_filter(signals, fs, order=FILTER_ORDER, cutoff=FILTER_CUTOFF):
+def lowpass_filter(signals: np.ndarray,
+                   sample_rate: float,
+                   order: int = FILTER_ORDER,
+                   cutoff: float = FILTER_CUTOFF):
     """ Lowpass filter the data
 
-    :param signals:
+    :param ndarray signals:
         A t x k array of k signals with t timepoints
-    :param fs:
+    :param float sample_rate:
         The sample rate for the signals
-    :param order:
+    :param int order:
         The order for the butterworth filter
-    :param cutoff:
+    :param float cutoff:
         the cutoff in Hz for the filter
     """
 
-    nyq = 0.5 * fs
+    nyq = 0.5 * sample_rate
     normal_cutoff = cutoff / nyq
     if normal_cutoff <= 0.0 or normal_cutoff >= 1.0:
         if DEBUG_OPTIMIZER:
-            print('Cannot filter, got -3dB: {}'.format(normal_cutoff))
-            print('Nyquist rate: {}'.format(nyq))
-            print('Sample rate (Hz): {}'.format(fs))
+            print(f'Cannot filter, got -3dB: {normal_cutoff}')
+            print(f'Nyquist rate: {nyq}')
+            print(f'Sample rate (Hz): {sample_rate}')
         return signals
 
     b, a = butter(order, normal_cutoff, btype='low', analog=False)
@@ -682,53 +434,94 @@ def lowpass_filter(signals, fs, order=FILTER_ORDER, cutoff=FILTER_CUTOFF):
     return np.stack(filtered_signals, axis=1)
 
 
-def find_key_times(time, signal, percents=50, direction='down'):
-    """ Find the key times
+def find_key_times(time: np.ndarray,
+                   signal: np.ndarray,
+                   percents: List[float] = 50,
+                   direction: str = 'down') -> List[float]:
+    """ Find the key times where a signal crosses percentile thresholds
+
+    The signal is expected to be either monotonic increasing or monotonic decreasing
+
+    If the signal is **NOT** monotonic, reports only the first time crossing
+    the percentile threshold
 
     :param ndarray time:
         The time vector
     :param ndarray signal:
-        The signal vector
-    :param list percents:
+        The signal vector, either monotonic increasing or decreasing
+    :param list[float] percents:
         A number or list of numbers of times to extract
     :param str direction:
-        "up" or "down". Up for a signal expected to be increasing,
-        down for the opposite
+        "up" or "down". Up for a signal expected to be increasing, down for decreasing
     :returns:
-        A list of times where the signal crosses those thresholds
+        A list of the first time where the signal crosses each threshold
     """
 
+    # Work out the dynamic range of the signal
     sig_max = np.max(signal)
     sig_min = np.min(signal)
 
     sig_range = sig_max - sig_min
 
+    # Work out where the percentile cutoffs are
     if isinstance(percents, (int, float)):
         percents = [percents]
     percents = [float(p)/100.0 * sig_range + sig_min
                 for p in percents]
 
+    # For each percentile, find the times where the signal crosses that threshold
     pct_times = []
     for pct in percents:
         if direction == 'up':
             idx = np.nonzero(signal >= pct)[0]
+            # If no crossings, return None
             if len(idx) < 1:
                 pct_time = None
             else:
-                pct_time = time[idx[0]] - time[0]
+                # Otherwise interpolate across the gap
+                i1 = idx[0]
+                if i1 <= 0:
+                    pct_time = 0.0
+                else:
+                    # y0 is less than y1
+                    i0 = i1 - 1
+                    y0 = signal[i0]
+                    y1 = signal[i1]
+                    w = (pct - y0) / (y1 - y0)
+
+                    t0 = time[i0]
+                    t1 = time[i1]
+                    pct_time = (t1 - t0)*w + (t0 - time[0])
         elif direction == 'down':
+            # If no crossings, return None
             idx = np.nonzero(signal <= pct)[0]
             if len(idx) < 1:
                 pct_time = None
             else:
-                pct_time = time[idx[0]] - time[0]
+                # Otherwise interpolate across the gap
+                i1 = idx[0]
+                if i1 <= 0:
+                    pct_time = 0.0
+                else:
+                    # y0 is greater than y1
+                    i0 = i1 - 1
+                    y0 = signal[i0]
+                    y1 = signal[i1]
+                    w = (y0 - pct) / (y0 - y1)
+
+                    t0 = time[i0]
+                    t1 = time[i1]
+                    pct_time = (t1 - t0)*w + (t0 - time[0])
         else:
-            raise KeyError('Unknown direction: {}'.format(direction))
+            raise KeyError(f'Unknown direction: "{direction}"')
         pct_times.append(pct_time)
     return pct_times
 
 
-def calc_velocity_stats(time, signal, direction='up', time_scale=TIME_SCALE):
+def calc_velocity_stats(time: np.ndarray,
+                        signal: np.ndarray,
+                        direction: str = 'up',
+                        time_scale: float = TIME_SCALE) -> Tuple[float]:
     """ Calculate the velocity statistics
 
     :param ndarray time:
@@ -739,6 +532,8 @@ def calc_velocity_stats(time, signal, direction='up', time_scale=TIME_SCALE):
         One of 'up' or 'down', which direction to calculate stats
     :param float time_scale:
         The scaling factor to convert the time array to seconds
+    :returns:
+        A tuple of mean, std, and max velocity in the specified direction
     """
     if time.shape[0] < 3 or signal.shape[0] < 3:
         return np.nan, np.nan, np.nan
@@ -752,7 +547,7 @@ def calc_velocity_stats(time, signal, direction='up', time_scale=TIME_SCALE):
     elif direction == 'down':
         vel = -vel[vel < 0]
     else:
-        raise KeyError('Unknown direction: {}'.format(direction))
+        raise KeyError(f'Unknown direction: "{direction}"')
 
     if vel.shape[0] < 3:
         return np.nan, np.nan, np.nan
@@ -763,9 +558,12 @@ def calc_velocity_stats(time, signal, direction='up', time_scale=TIME_SCALE):
         return -np.mean(vel), np.std(vel), -np.max(vel)
 
 
-def calc_stats_around_peak(time, signal, peak_bounds, valley_rel=0.05,
-                           time_scale=TIME_SCALE,
-                           skip_model_fit=False):
+def calc_stats_around_peak(time: np.ndarray,
+                           signal: np.ndarray,
+                           peak_bounds: Tuple[int],
+                           valley_rel: float = 0.05,
+                           time_scale: float = TIME_SCALE,
+                           skip_model_fit: bool = False) -> Dict[str, float]:
     """ Calculate the stats around a single peak
 
     :param ndarray time:
@@ -898,7 +696,7 @@ def calc_signal_stats(time: np.ndarray,
                       signals: np.ndarray,
                       time_scale: float = TIME_SCALE,
                       samples_around_peak: int = SAMPLES_AROUND_PEAK,
-                      skip_model_fit: bool = False):
+                      skip_model_fit: bool = False) -> Tuple[List]:
     """ Calculate useful stats for a set of signals
 
     :param ndarray time:
@@ -922,13 +720,14 @@ def calc_signal_stats(time: np.ndarray,
         # Mask out invalid values
         sigmask = np.isfinite(signal)
         if not np.any(sigmask):
-            print('Empty signal in sample: {}'.format(i))
+            print(f'Empty signal in sample: {i}')
             continue
 
         # Mask out signals with discontinuities
         offset_st, offset_ed = np.nonzero(sigmask)[0][[0, -1]]
         if not np.all(sigmask[offset_st:offset_ed+1]):
-            print('Non-contiguous signal in sample: {}'.format(i))
+            invalid_indices = np.nonzero(~sigmask[offset_st:offset_ed+1])
+            print(f'Non-contiguous signal in sample {i}: {invalid_indices}')
             continue
 
         signal_finite = signal[sigmask]
@@ -947,13 +746,15 @@ def calc_signal_stats(time: np.ndarray,
     return valid_signal_indicies, all_peaks
 
 
-def refine_signal_peaks(time, signal, peaks,
-                        valley_rel=0.05,
-                        min_peak_width=1,
-                        min_peak_height=0.0,
-                        offset=0,
-                        time_scale=TIME_SCALE,
-                        skip_model_fit=False):
+def refine_signal_peaks(time: np.ndarray,
+                        signal: np.ndarray,
+                        peaks: List[int],
+                        valley_rel: float = 0.05,
+                        min_peak_width: int = 1,
+                        min_peak_height: float = 0.0,
+                        offset: int = 0,
+                        time_scale: float = TIME_SCALE,
+                        skip_model_fit: bool = False) -> List[int]:
     """ Refine the raw peak indicies for the signal
 
     :param ndarray time:
@@ -1001,6 +802,7 @@ def refine_signal_peaks(time, signal, peaks,
 
             peak_height = stats['peak_height']
 
+            # If the peak is wide enough and tall enough, keep it
             if all([peak_start_index < mid,
                     peak_end_index > mid,
                     peak_end_index - peak_start_index > min_peak_width,
@@ -1027,7 +829,8 @@ def refine_signal_peaks(time, signal, peaks,
     return []
 
 
-def select_top_stats(stats, min_score=MIN_STATS_SCORE):
+def select_top_stats(stats: List[Dict],
+                     min_score: float = MIN_STATS_SCORE) -> List[Dict]:
     """ Pick the better peaks to use for analysis
 
     Each peak is scored by peak area = (peak width * peak height)
@@ -1063,7 +866,8 @@ def select_top_stats(stats, min_score=MIN_STATS_SCORE):
     return top_stats
 
 
-def add_summary_stats(stats, time_scale=TIME_SCALE):
+def add_summary_stats(stats: List[Dict],
+                      time_scale: float = TIME_SCALE) -> List[Dict]:
     """ Summarize the data per-signal
 
     :param list stats:
@@ -1127,21 +931,22 @@ def add_summary_stats(stats, time_scale=TIME_SCALE):
 # Per-Data file processing
 
 
-def filter_datafile(infile, outfile,
-                    data_type=DATA_TYPE,
-                    signal_type=SIGNAL_TYPE,
-                    filter_cutoff=FILTER_CUTOFF,
-                    filter_order=FILTER_ORDER,
-                    plot_types=None,
-                    time_scale=TIME_SCALE,
-                    skip_detrend=False,
-                    skip_lowpass=False,
-                    skip_model_fit=False,
-                    samples_around_peak=SAMPLES_AROUND_PEAK,
-                    flip_signal=False,
-                    level_shift=None,
-                    plotfile=None,
-                    linear_model=LINEAR_MODEL):
+def filter_datafile(infile: pathlib.Path,
+                    outfile: pathlib.Path,
+                    data_type: str = DATA_TYPE,
+                    signal_type: str = SIGNAL_TYPE,
+                    filter_cutoff: float = FILTER_CUTOFF,
+                    filter_order: float = FILTER_ORDER,
+                    plot_types: Optional[List[str]] = None,
+                    time_scale: float = TIME_SCALE,
+                    skip_detrend: bool = False,
+                    skip_lowpass: bool = False,
+                    skip_model_fit: bool = False,
+                    samples_around_peak: int = SAMPLES_AROUND_PEAK,
+                    flip_signal: bool = False,
+                    level_shift: Optional[str] = None,
+                    plotfile: Optional[pathlib.Path] = None,
+                    linear_model: str = LINEAR_MODEL):
     """ Apply the filtering operation
 
     :param Path infile:
@@ -1175,20 +980,23 @@ def filter_datafile(infile, outfile,
         time, raw_signals = DataReader(data_type).read_infile(
             infile, flip_signal=flip_signal, level_shift=level_shift)
     except OSError as err:
-        print('Error {} reading "{}"'.format(err, infile))
+        print(f'Error {err} reading "{infile}"')
         if DEBUG_OPTIMIZER:
             traceback.print_exc()
         return None
 
     dt = np.nanmedian(time[1:] - time[:-1]) / time_scale  # Seconds
-    fs = 1.0 / dt
+    sample_rate = 1.0 / dt
 
     signals, trend_lines = remove_trend(raw_signals,
                                         signal_type=signal_type,
                                         skip_detrend=skip_detrend,
                                         linear_model=linear_model)
     if not skip_lowpass:
-        signals = lowpass_filter(signals, fs=fs, cutoff=filter_cutoff, order=filter_order)
+        signals = lowpass_filter(signals,
+                                 sample_rate=sample_rate,
+                                 cutoff=filter_cutoff,
+                                 order=filter_order)
 
     signal_indicies, stats = calc_signal_stats(time, signals,
                                                time_scale=time_scale,
@@ -1233,7 +1041,7 @@ def maybe_analyze_datafile(processing_item: AnalysisParams):
         plotfile = None
     else:
         plotfile = plotdir / (datafile.stem + processing_item.plot_suffix)
-    print('Processing {}'.format(datafile.name))
+    print(f'Processing {datafile.name}')
     try:
         stat = filter_datafile(datafile, outfile,
                                plot_types=processing_item.plot_types,
@@ -1251,7 +1059,7 @@ def maybe_analyze_datafile(processing_item: AnalysisParams):
                                linear_model=processing_item.linear_model,
                                plotfile=plotfile)
     except Exception:
-        print('Errors processing {}'.format(datafile.name))
+        print(f'Errors processing {datafile.name}')
         traceback.print_exc()
         stat = None
     return datafile, stat

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # Stdlib
 import unittest
@@ -7,9 +7,78 @@ import unittest
 import numpy as np
 
 # Our own imports
-from cm_microtissue_func import signals
+from multilineage_organoid import signals
 
 # Tests
+
+
+class TestFindKeyTimes(unittest.TestCase):
+
+    def test_finds_times_at_boundary(self):
+
+        timeline = np.array([0, 1, 2, 3, 4, 5])
+        values = np.array([1, 3, 5, 7, 9, 11])
+
+        key_times = signals.find_key_times(timeline, values, [0, 100], direction='up')
+
+        exp_times = [0, 5]
+
+        np.testing.assert_allclose(key_times, exp_times)
+
+        timeline = np.array([0, 1, 2, 3, 4, 5])
+        values = np.array([13, 11, 9, 8, 6, 4])
+
+        key_times = signals.find_key_times(timeline, values, [0, 100], direction='down')
+
+        exp_times = [5, 0]
+
+        np.testing.assert_allclose(key_times, exp_times)
+
+    def test_finds_times_in_the_middle(self):
+
+        timeline = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]) + 15
+        values = np.array([1, 3, 5, 7, 9, 11, 13, 15, 17])
+
+        key_times = signals.find_key_times(timeline, values, [25, 50, 75], direction='up')
+
+        exp_times = [2, 4, 6]
+
+        np.testing.assert_allclose(key_times, exp_times)
+
+        timeline = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]) + 15
+        values = np.array([17, 15, 13, 11, 9, 7, 5, 3, 1])
+
+        key_times = signals.find_key_times(timeline, values, [25, 50, 75], direction='down')
+
+        exp_times = [6, 4, 2]
+
+        np.testing.assert_allclose(key_times, exp_times)
+
+    def test_finds_times_linear_interpolated(self):
+
+        timeline = np.array([0, 2, 8, 9]) + 13
+        values = np.array([1, 5, 15, 17])
+
+        key_times = signals.find_key_times(timeline, values, [25, 50, 75], direction='up')
+
+        # 25% from (1 to 17) is 5, so t = 2.0
+        # 50% from (1 to 17) is 9, so t = (9-5)/(15-5)*(8-2) + 2 = 4.4
+        # 75% from (1 to 17) is 13, so t = (13-5)/(15-5)*(8-2) + 2 = 6.8
+        exp_times = [2, 4.4, 6.8]
+
+        np.testing.assert_allclose(key_times, exp_times)
+
+        timeline = np.array([0, 2, 8, 9]) + 13
+        values = np.array([17, 15, 5, 1])
+
+        key_times = signals.find_key_times(timeline, values, [25, 50, 75], direction='down')
+
+        # 25% from (17 to 1) is 5, so t = 8.0
+        # 50% from (17 to 1) is 9, so t = (15-9)/(15-5)*(8-2) + 2 = 5.6
+        # 75% from (17 to 1) is 13, so t = (15-13)/(15-5)*(8-2) + 2 = 3.2
+        exp_times = [8, 5.6, 3.2]
+
+        np.testing.assert_allclose(key_times, exp_times)
 
 
 class TestCalcStatsAroundPeak(unittest.TestCase):

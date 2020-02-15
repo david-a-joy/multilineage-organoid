@@ -1,3 +1,5 @@
+""" Shared default parameters across the modules """
+
 SIGNAL_TYPE = 'F/F0'  # F-F0, F/F0, F-F0/F0
 
 LINEAR_MODEL = 'ransac'  # 'least_squares' or 'ransac' or 'exp_ransac'

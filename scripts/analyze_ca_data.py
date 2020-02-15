@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 """ Signal processing to filter cardiac calcium traces
 
@@ -80,13 +80,13 @@ from typing import Optional, List
 # For testing, add the local directory to the path
 THISDIR = pathlib.Path(__file__).resolve().parent
 BASEDIR = THISDIR.parent
-if THISDIR.name == 'scripts' and (BASEDIR / 'cm_microtissue_toolbox').is_dir():
+if THISDIR.name == 'scripts' and (BASEDIR / 'multilineage_organoid').is_dir():
     sys.path.insert(0, str(BASEDIR))
 
 # Our own imports
-from cm_microtissue_func import signals
-from cm_microtissue_func.io import save_final_stats
-from cm_microtissue_func.consts import (
+from multilineage_organoid import signals
+from multilineage_organoid.io import save_final_stats
+from multilineage_organoid.consts import (
     SIGNAL_TYPE, FILTER_CUTOFF, SAMPLES_AROUND_PEAK, LINEAR_MODEL, DATA_TYPE,
     TIME_SCALE, PLOT_SUFFIX, FILTER_ORDER
 )
@@ -120,6 +120,8 @@ def analyze_ca_data(datadir: pathlib.Path,
         The suffix to save plots with (either '.png' or '.svg')
     :param int processes:
         The number of parallel processes to run the filtering with
+    :param \\*\\*kwargs:
+        Additional parameters to pass to AnalysisParams
     """
     # Work out which plot(s) we got requested
     if plot_types in (None, []):
