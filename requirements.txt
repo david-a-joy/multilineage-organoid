@@ -1,0 +1,13 @@
+numpy
+matplotlib
+scipy
+pandas
+scikit-image
+scikit-learn
+
+pytest
+pyflakes
+pycodestyle
+
+sphinx
+alabaster
