@@ -3,6 +3,8 @@
 # Stdlib
 import unittest
 
+from helpers import FileSystemTestCase, BASEDIR
+
 # 3rd party
 import numpy as np
 
@@ -10,6 +12,45 @@ import numpy as np
 from multilineage_organoid import signals
 
 # Tests
+
+
+class TestFilterDatafile(FileSystemTestCase):
+
+    def test_everything_works_multilineage(self):
+
+        infile = BASEDIR / 'data' / 'Exp7_d80_MultilineageOrganoid_pacing_1hz.csv'
+        outfile = self.tempdir / 'out.csv'
+        plotfile = self.tempdir / 'plot.png'
+
+        exp_traces = 4
+
+        res = signals.filter_datafile(infile=infile,
+                                      outfile=outfile,
+                                      plotfile=plotfile,
+                                      plot_types='all')
+
+        self.assertTrue(outfile.is_file())
+        for i in range(1, exp_traces+1):
+            self.assertTrue((plotfile.parent / f'{plotfile.stem}_{i:02d}.png').is_file())
+        self.assertEqual(len(res), exp_traces)
+
+    def test_everything_works_microtissue(self):
+
+        infile = BASEDIR / 'data' / 'Exp7_d80_ConventionalMicrotissue_pacing_1hz.csv'
+        outfile = self.tempdir / 'out.csv'
+        plotfile = self.tempdir / 'plot.png'
+
+        exp_traces = 2
+
+        res = signals.filter_datafile(infile=infile,
+                                      outfile=outfile,
+                                      plotfile=plotfile,
+                                      plot_types='all')
+
+        self.assertTrue(outfile.is_file())
+        for i in range(1, exp_traces+1):
+            self.assertTrue((plotfile.parent / f'{plotfile.stem}_{i:02d}.png').is_file())
+        self.assertEqual(len(res), exp_traces)
 
 
 class TestFindKeyTimes(unittest.TestCase):

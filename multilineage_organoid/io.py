@@ -74,6 +74,7 @@ class DataReader(object):
 
     * :py:meth:`read_infile_ca_data`: Data from Zen GCAMP imaging
     * :py:meth:`read_infile_ephys_data`: Data from electrophysiology
+    * :py:meth:`read_infile_measure_data`: Data from the Zen measure tool
 
     Define a new reader:
 
@@ -224,7 +225,7 @@ class DataReader(object):
 
         CA GCAMP imaging has a crazy file structure:
 
-        .. code-block:: bash
+        .. code-block:: text
 
             WeirdTimeColumn,Area1,Mean1,Total1,Max1,Area2,Mean2,...
             "MS",stupid,number,of,commas,...
@@ -326,7 +327,7 @@ class DataReader(object):
 
         CA GCAMP imaging has a crazy file structure:
 
-        .. code-block:: bash
+        .. code-block:: text
 
             WeirdNameColumn,WeirdTime,WeirdArea,WeirdDiameter
             "MS",stupid,number,of,commas,...

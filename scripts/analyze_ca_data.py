@@ -85,7 +85,7 @@ if THISDIR.name == 'scripts' and (BASEDIR / 'multilineage_organoid').is_dir():
 
 # Our own imports
 from multilineage_organoid import signals
-from multilineage_organoid.io import save_final_stats
+from multilineage_organoid import save_final_stats, find_ca_data
 from multilineage_organoid.consts import (
     SIGNAL_TYPE, FILTER_CUTOFF, SAMPLES_AROUND_PEAK, LINEAR_MODEL, DATA_TYPE,
     TIME_SCALE, PLOT_SUFFIX, FILTER_ORDER
@@ -160,7 +160,7 @@ def analyze_ca_data(datadir: pathlib.Path,
                                                plotdir=plotdir,
                                                outdir=outdir,
                                                **kwargs)
-                        for datafile in signals.find_ca_data(datadir))
+                        for datafile in find_ca_data(datadir))
 
     # Do parallel processing on the stats
     if processes <= 1:

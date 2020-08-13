@@ -14,16 +14,25 @@
 # import sys
 # sys.path.insert(0, os.path.abspath('.'))
 
+import pathlib
+import sys
+
+thisdir = pathlib.Path(__file__).resolve().parent
+moduledir = thisdir.parent
+sys.path.insert(0, str(moduledir))
+
+from multilineage_organoid import __about__
 
 # -- Project information -----------------------------------------------------
 
-project = 'Cardiac Microtissue Function Toolbox'
-copyright = '2020, David Joy'
-author = 'David Joy'
+project = 'Calcium Trace Analysis for Cardiac and Multilineage Organoids'
+copyright = __about__.__copyright__
+author = __about__.__author__
 
-# The full version, including alpha/beta/rc tags
-release = '0.1'
-
+# The short X.Y version.
+version = '.'.join(str(v) for v in __about__.__version_info__[:2])
+# The full version, including alpha/beta/rc tags.
+release = '.'.join(str(v) for v in __about__.__version_info__)
 
 # -- General configuration ---------------------------------------------------
 
@@ -31,6 +40,9 @@ release = '0.1'
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
 extensions = [
+    'sphinx.ext.mathjax',
+    'sphinx.ext.autodoc',
+    'sphinx.ext.viewcode',
 ]
 
 # Add any paths that contain templates here, relative to this directory.

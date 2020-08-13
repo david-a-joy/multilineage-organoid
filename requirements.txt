@@ -4,6 +4,7 @@ scipy
 pandas
 scikit-image
 scikit-learn
+openpyxl
 
 pytest
 pyflakes
@@ -11,3 +12,5 @@ pycodestyle
 
 sphinx
 alabaster
+
+wheel
